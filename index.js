@@ -10,23 +10,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// ── 請求佇列：每個 OHLC 請求間隔 2 秒，避免 429 ──────────────────────────
-const queue = [];
-let running = false;
-function enqueue(fn) {
-  return new Promise((resolve, reject) => {
-    queue.push({ fn, resolve, reject });
-    if (!running) processQueue();
-  });
-}
-async function processQueue() {
-  if (!queue.length) { running = false; return; }
-  running = true;
-  const { fn, resolve, reject } = queue.shift();
-  try { resolve(await fn()); } catch (e) { reject(e); }
-  setTimeout(processQueue, 2000); // 2秒間隔
-}
-
 // ── LINE 通知 ─────────────────────────────────────────────────────────────
 app.post("/notify", async (req, res) => {
   const { message } = req.body;
@@ -46,14 +29,17 @@ app.post("/notify", async (req, res) => {
   }
 });
 
-// ── 價格（單次請求，不走佇列）────────────────────────────────────────────
+// ── Binance 即時價格 ──────────────────────────────────────────────────────
+// GET /prices?symbols=BTCUSDT,ETHUSDT
 app.get("/prices", async (req, res) => {
-  const { ids } = req.query;
-  if (!ids) return res.status(400).json({ error: "缺少 ids" });
+  const { symbols } = req.query;
+  if (!symbols) return res.status(400).json({ error: "缺少 symbols" });
   try {
+    const list = symbols.split(",");
+    // Binance ticker/24hr 支援批次
     const { data } = await axios.get(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true`,
-      { timeout: 10000 }
+      "https://api.binance.com/api/v3/ticker/24hr",
+      { params: { symbols: JSON.stringify(list) }, timeout: 10000 }
     );
     res.json(data);
   } catch (e) {
@@ -61,24 +47,24 @@ app.get("/prices", async (req, res) => {
   }
 });
 
-// ── OHLC（走佇列）────────────────────────────────────────────────────────
-app.get("/ohlc", async (req, res) => {
-  const { id, days } = req.query;
-  if (!id || !days) return res.status(400).json({ error: "缺少參數 id 或 days" });
+// ── Binance K線（RSI / ADX 用）────────────────────────────────────────────
+// GET /klines?symbol=BTCUSDT&interval=1h&limit=100
+app.get("/klines", async (req, res) => {
+  const { symbol, interval, limit } = req.query;
+  if (!symbol || !interval) return res.status(400).json({ error: "缺少參數" });
   try {
-    const data = await enqueue(() =>
-      axios.get(
-        `https://api.coingecko.com/api/v3/coins/${id}/ohlc?vs_currency=usd&days=${days}`,
-        { timeout: 15000 }
-      ).then(r => r.data)
-    );
+    const { data } = await axios.get("https://api.binance.com/api/v3/klines", {
+      params: { symbol, interval, limit: limit || 100 },
+      timeout: 10000
+    });
+    // 回傳格式: [[openTime, open, high, low, close, volume, ...], ...]
     res.json(data);
   } catch (e) {
     res.status(e.response?.status || 500).json({ error: e.message });
   }
 });
 
-// ── 搜尋 ─────────────────────────────────────────────────────────────────
+// ── 搜尋（仍用 CoinGecko，只有搜尋才用，頻率低）────────────────────────
 app.get("/search", async (req, res) => {
   const { query } = req.query;
   if (!query) return res.status(400).json({ error: "缺少 query" });
@@ -93,5 +79,5 @@ app.get("/search", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => res.json({ status: "ok", queueLength: queue.length }));
+app.get("/", (req, res) => res.json({ status: "ok" }));
 app.listen(process.env.PORT || 3000, () => console.log("Proxy 已啟動"));
