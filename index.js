@@ -29,51 +29,61 @@ app.post("/notify", async (req, res) => {
   }
 });
 
-// ── Binance 即時價格 ──────────────────────────────────────────────────────
-// GET /prices?symbols=BTCUSDT,ETHUSDT
+// ── 價格（CryptoCompare）─────────────────────────────────────────────────
+// GET /prices?symbols=BTC,ETH,SOL
 app.get("/prices", async (req, res) => {
   const { symbols } = req.query;
   if (!symbols) return res.status(400).json({ error: "缺少 symbols" });
   try {
-    const list = symbols.split(",");
-    // Binance ticker/24hr 支援批次
-    const { data } = await axios.get(
-      "https://api.binance.com/api/v3/ticker/24hr",
-      { params: { symbols: JSON.stringify(list) }, timeout: 10000 }
-    );
+    const { data } = await axios.get("https://min-api.cryptocompare.com/data/pricemultifull", {
+      params: { fsyms: symbols, tsyms: "USD" },
+      timeout: 10000
+    });
     res.json(data);
   } catch (e) {
     res.status(e.response?.status || 500).json({ error: e.message });
   }
 });
 
-// ── Binance K線（RSI / ADX 用）────────────────────────────────────────────
-// GET /klines?symbol=BTCUSDT&interval=1h&limit=100
+// ── OHLCV K線（CryptoCompare）────────────────────────────────────────────
+// GET /klines?symbol=BTC&interval=1H&limit=120
 app.get("/klines", async (req, res) => {
   const { symbol, interval, limit } = req.query;
   if (!symbol || !interval) return res.status(400).json({ error: "缺少參數" });
+  const lim = parseInt(limit) || 120;
+  // CryptoCompare endpoints: histohour / histoday / histominute
+  const endpointMap = { "1H": "histohour", "4H": "histohour", "1D": "histoday" };
+  const aggregateMap = { "1H": 1, "4H": 4, "1D": 1 };
+  const endpoint = endpointMap[interval] || "histohour";
+  const aggregate = aggregateMap[interval] || 1;
+  const realLimit = interval === "4H" ? Math.ceil(lim * 4) : lim;
   try {
-    const { data } = await axios.get("https://api.binance.com/api/v3/klines", {
-      params: { symbol, interval, limit: limit || 100 },
+    const { data } = await axios.get(`https://min-api.cryptocompare.com/data/v2/${endpoint}`, {
+      params: { fsym: symbol, tsym: "USD", limit: realLimit, aggregate },
       timeout: 10000
     });
-    // 回傳格式: [[openTime, open, high, low, close, volume, ...], ...]
-    res.json(data);
+    if (data.Response === "Error") throw new Error(data.Message);
+    res.json(data.Data.Data); // array of {time, open, high, low, close, volumefrom}
   } catch (e) {
-    res.status(e.response?.status || 500).json({ error: e.message });
+    res.status(500).json({ error: e.message });
   }
 });
 
-// ── 搜尋（仍用 CoinGecko，只有搜尋才用，頻率低）────────────────────────
+// ── 搜尋（CryptoCompare）─────────────────────────────────────────────────
 app.get("/search", async (req, res) => {
   const { query } = req.query;
   if (!query) return res.status(400).json({ error: "缺少 query" });
   try {
-    const { data } = await axios.get(
-      `https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(query)}`,
-      { timeout: 10000 }
-    );
-    res.json(data);
+    const { data } = await axios.get("https://min-api.cryptocompare.com/data/all/coinlist", {
+      params: { summary: true },
+      timeout: 10000
+    });
+    const q = query.toUpperCase();
+    const results = Object.values(data.Data || {})
+      .filter(c => c.Symbol && (c.Symbol.toUpperCase().includes(q) || (c.CoinName||"").toUpperCase().includes(q)))
+      .slice(0, 8)
+      .map(c => ({ symbol: c.Symbol, name: c.CoinName || c.Symbol, market_cap_rank: c.SortOrder }));
+    res.json({ coins: results });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
